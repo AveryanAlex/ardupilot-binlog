@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::BinlogError;
@@ -11,6 +11,16 @@ const HEADER_MAGIC: [u8; 2] = [0xA3, 0x95];
 const TAIL_SCAN_SIZE: u64 = 65536;
 
 /// High-level wrapper for reading a DataFlash BIN file from disk.
+///
+/// ```no_run
+/// use ardupilot_binlog::File;
+///
+/// let file = File::open("flight.bin").unwrap();
+/// for result in file.entries().unwrap() {
+///     let entry = result.unwrap();
+///     println!("{}", entry.name);
+/// }
+/// ```
 pub struct File {
     path: PathBuf,
 }
@@ -25,9 +35,9 @@ impl File {
     }
 
     /// Return a fresh reader over the file's entries.
-    pub fn entries(&self) -> Result<Reader<BufReader<fs::File>>, BinlogError> {
+    pub fn entries(&self) -> Result<Reader<fs::File>, BinlogError> {
         let file = fs::File::open(&self.path)?;
-        Ok(Reader::new(BufReader::new(file)))
+        Ok(Reader::new(file))
     }
 
     /// Scan the file and return the time range (first_usec, last_usec).
@@ -37,6 +47,10 @@ impl File {
     /// Returns None for empty files or files with no timestamped entries.
     ///
     /// Timestamps are boot-relative, not Unix epoch.
+    ///
+    /// **Precondition:** assumes all FMT definitions appear before the first
+    /// timestamped message, which is the standard ArduPilot file layout.
+    /// The tail scan reuses formats discovered during the head scan.
     pub fn time_range(&self) -> Result<Option<(u64, u64)>, BinlogError> {
         let metadata = fs::metadata(&self.path)?;
         let file_size = metadata.len();
@@ -49,7 +63,8 @@ impl File {
         let mut first_ts: Option<u64> = None;
 
         // Parse entries to collect all FMTs and find first timestamp
-        while let Some(entry) = reader.next_entry()? {
+        for result in reader.by_ref() {
+            let entry = result?;
             if let Some(ts) = entry.timestamp_usec {
                 first_ts = Some(ts);
                 break;
@@ -141,7 +156,11 @@ mod tests {
         fs::write(&path, []).unwrap();
 
         let file = File::open(&path).unwrap();
-        let entries = file.entries().unwrap().collect().unwrap();
+        let entries: Vec<_> = file
+            .entries()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(entries.is_empty());
 
         assert_eq!(file.time_range().unwrap(), None);

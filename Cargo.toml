@@ -8,5 +8,12 @@ repository = "https://github.com/AveryanAlex/ardupilot-binlog"
 keywords = ["ardupilot", "dataflash", "drone", "flight-log", "uav"]
 categories = ["parser-implementations", "aerospace"]
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"], optional = true }
+
+[workspace]
+exclude = ["fuzz"]

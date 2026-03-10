@@ -19,7 +19,8 @@ use ardupilot_binlog::File;
 let file = File::open("flight.bin")?;
 let mut reader = file.entries()?;
 
-while let Some(entry) = reader.next_entry()? {
+for result in &mut reader {
+    let entry = result?;
     if entry.name == "ATT" {
         let roll = entry.get_f64("Roll").unwrap_or(0.0);
         let pitch = entry.get_f64("Pitch").unwrap_or(0.0);
@@ -34,7 +35,7 @@ while let Some(entry) = reader.next_entry()? {
 use ardupilot_binlog::File;
 
 let file = File::open("flight.bin")?;
-let entries = file.entries()?.collect()?;
+let entries: Vec<_> = file.entries()?.collect::<Result<Vec<_>, _>>()?;
 
 let gps_entries: Vec<_> = entries.iter()
     .filter(|e| e.name == "GPS")
@@ -69,8 +70,9 @@ let data: Vec<u8> = /* BIN data from network, embedded resource, etc. */
 # vec![];
 let mut reader = Reader::new(Cursor::new(data));
 
-while let Some(entry) = reader.next_entry()? {
-    println!("{}: {} fields", entry.name, entry.fields.len());
+for result in &mut reader {
+    let entry = result?;
+    println!("{}: {} fields", entry.name, entry.len());
 }
 # Ok::<(), ardupilot_binlog::BinlogError>(())
 ```
@@ -82,7 +84,7 @@ use ardupilot_binlog::File;
 
 let file = File::open("flight.bin")?;
 let mut reader = file.entries()?;
-while reader.next_entry()?.is_some() {}
+for result in reader.by_ref() { result?; }
 
 for (_, fmt) in reader.formats() {
     println!("{}: format='{}', labels={:?}", fmt.name, fmt.format, fmt.labels);

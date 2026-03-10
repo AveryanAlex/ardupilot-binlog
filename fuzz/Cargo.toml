@@ -1,0 +1,19 @@
+[package]
+name = "ardupilot-binlog-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ardupilot-binlog = { path = ".." }
+
+[[bin]]
+name = "fuzz_reader"
+path = "fuzz_targets/fuzz_reader.rs"
+doc = false
+
+[workspace]

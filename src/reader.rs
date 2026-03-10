@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
+use std::sync::Arc;
 
 use crate::entry::Entry;
 use crate::error::BinlogError;
@@ -12,7 +13,19 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 256;
 /// Streaming parser for DataFlash BIN data.
 ///
 /// Reads from any `Read` source, discovers message schemas via FMT
-/// messages, and yields parsed entries.
+/// messages, and yields parsed [`Entry`] values via the [`Iterator`] trait.
+///
+/// ```
+/// use ardupilot_binlog::Reader;
+/// use std::io::Cursor;
+///
+/// let data: Vec<u8> = vec![];
+/// let reader = Reader::new(Cursor::new(data));
+/// for result in reader {
+///     let entry = result.unwrap();
+///     println!("{}: {} fields", entry.name, entry.len());
+/// }
+/// ```
 pub struct Reader<R: Read> {
     reader: BufReader<R>,
     formats: HashMap<u8, MessageFormat>,
@@ -31,13 +44,13 @@ impl<R: Read> Reader<R> {
                 msg_len: 89,
                 name: "FMT".into(),
                 format: "BBnNZ".into(),
-                labels: vec![
+                labels: Arc::from([
                     "Type".into(),
                     "Length".into(),
                     "Name".into(),
                     "Format".into(),
                     "Labels".into(),
-                ],
+                ]),
             },
         );
 
@@ -48,15 +61,7 @@ impl<R: Read> Reader<R> {
         }
     }
 
-    /// Read the next entry. Returns Ok(None) at EOF.
-    ///
-    /// FMT messages are parsed and registered internally, and also
-    /// yielded as Entry values so callers can inspect them.
-    ///
-    /// On parse errors, the reader attempts recovery by scanning for
-    /// the next valid header bytes (0xA3, 0x95). After 256 consecutive
-    /// failures, returns Ok(None).
-    pub fn next_entry(&mut self) -> Result<Option<Entry>, BinlogError> {
+    fn next_inner(&mut self) -> Result<Option<Entry>, BinlogError> {
         if self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
             return Ok(None);
         }
@@ -82,33 +87,25 @@ impl<R: Read> Reader<R> {
         self.parse_message(msg_type)
     }
 
-    /// Consume the reader and collect all remaining entries.
-    pub fn collect(mut self) -> Result<Vec<Entry>, BinlogError> {
-        let mut entries = Vec::new();
-        while let Some(entry) = self.next_entry()? {
-            entries.push(entry);
-        }
-        Ok(entries)
-    }
-
     /// Return all message format definitions discovered so far.
+    #[must_use]
     pub fn formats(&self) -> &HashMap<u8, MessageFormat> {
         &self.formats
     }
 
     /// Parse a message given its type byte (header already consumed).
     fn parse_message(&mut self, msg_type: u8) -> Result<Option<Entry>, BinlogError> {
-        // Look up format
-        let format = match self.formats.get(&msg_type) {
-            Some(f) => f.clone(),
+        // Look up msg_len first, then drop the borrow so we can read from self.reader
+        let msg_len = match self.formats.get(&msg_type) {
+            Some(f) => f.msg_len,
             None => {
                 self.consecutive_errors += 1;
                 return self.recover_and_retry();
             }
         };
 
-        // Read payload
-        let payload_len = format.msg_len as usize - 3;
+        // Read payload (format borrow is dropped)
+        let payload_len = msg_len as usize - 3;
         let mut payload = vec![0u8; payload_len];
         match self.read_exact_or_eof(&mut payload) {
             Ok(true) => {}
@@ -122,18 +119,23 @@ impl<R: Read> Reader<R> {
         if msg_type == FMT_TYPE {
             match parse_fmt_payload(&payload) {
                 Ok(new_fmt) => {
-                    let fields = match format.decode_fields(&payload) {
-                        Ok(f) => f,
+                    // Re-borrow format to decode fields
+                    let format = self.formats.get(&FMT_TYPE).unwrap();
+                    let values = match format.decode_fields(&payload) {
+                        Ok(v) => v,
                         Err(_) => {
                             self.consecutive_errors += 1;
                             return self.recover_and_retry();
                         }
                     };
+                    let labels = format.labels.clone(); // Arc clone — cheap
+                                                        // Borrow released; safe to mutate self.formats
                     let entry = Entry {
                         name: "FMT".into(),
                         msg_type: FMT_TYPE,
                         timestamp_usec: None,
-                        fields,
+                        labels,
+                        values,
                     };
                     self.formats.insert(new_fmt.msg_type, new_fmt);
                     self.consecutive_errors = 0;
@@ -146,9 +148,11 @@ impl<R: Read> Reader<R> {
             }
         }
 
-        // Decode fields
-        let fields = match format.decode_fields(&payload) {
-            Ok(f) => f,
+        // Re-borrow format for field decoding (guaranteed to exist, checked above)
+        let format = self.formats.get(&msg_type).unwrap();
+
+        let values = match format.decode_fields(&payload) {
+            Ok(v) => v,
             Err(_) => {
                 self.consecutive_errors += 1;
                 return self.recover_and_retry();
@@ -159,7 +163,7 @@ impl<R: Read> Reader<R> {
         // - Modern logs: format char 'Q', label "TimeUS" (microseconds)
         // - Older logs: format char 'I', label "TimeMS" (milliseconds → convert to µs)
         let timestamp_usec = match format.format.chars().next() {
-            Some('Q') => fields.first().and_then(|(_, v)| v.as_u64()),
+            Some('Q') => values.first().and_then(|v| v.as_u64()),
             Some('I') => {
                 let is_time_field = format
                     .labels
@@ -167,9 +171,9 @@ impl<R: Read> Reader<R> {
                     .map(|l| l == "TimeMS" || l == "TimeUS")
                     .unwrap_or(false);
                 if is_time_field {
-                    fields
+                    values
                         .first()
-                        .and_then(|(_, v)| v.as_i64())
+                        .and_then(|v| v.as_i64())
                         .map(|ms| ms as u64 * 1000)
                 } else {
                     None
@@ -178,11 +182,15 @@ impl<R: Read> Reader<R> {
             _ => None,
         };
 
+        let name = format.name.clone();
+        let labels = format.labels.clone(); // Arc clone — cheap
+
         let entry = Entry {
-            name: format.name.clone(),
+            name,
             msg_type,
             timestamp_usec,
-            fields,
+            labels,
+            values,
         };
 
         self.consecutive_errors = 0;
@@ -245,6 +253,14 @@ impl<R: Read> Reader<R> {
     }
 }
 
+impl<R: Read> Iterator for Reader<R> {
+    type Item = Result<Entry, BinlogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_inner().transpose()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,7 +318,7 @@ mod tests {
     #[test]
     fn parse_empty_input() {
         let reader = Reader::new(std::io::Cursor::new(Vec::new()));
-        let entries = reader.collect().unwrap();
+        let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert!(entries.is_empty());
     }
 
@@ -310,7 +326,7 @@ mod tests {
     fn parse_fmt_bootstrap_only() {
         let data = build_fmt_bootstrap();
         let reader = Reader::new(std::io::Cursor::new(data));
-        let entries = reader.collect().unwrap();
+        let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "FMT");
         assert_eq!(entries[0].msg_type, FMT_TYPE);
@@ -339,7 +355,7 @@ mod tests {
         data.extend(build_data_message(0x81, &payload));
 
         let reader = Reader::new(std::io::Cursor::new(data));
-        let entries = reader.collect().unwrap();
+        let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(entries.len(), 3); // FMT(FMT), FMT(ATT), ATT
 
         let att = &entries[2];
@@ -367,7 +383,7 @@ mod tests {
         data.extend(build_data_message(0x81, &200u64.to_le_bytes()));
 
         let reader = Reader::new(std::io::Cursor::new(data));
-        let entries = reader.collect().unwrap();
+        let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         // Should have: FMT(FMT), FMT(TST), TST(100), TST(200)
         let tst_entries: Vec<_> = entries.iter().filter(|e| e.name == "TST").collect();
@@ -389,7 +405,7 @@ mod tests {
         data.extend_from_slice(&[0; 3]); // only 3 of 8 payload bytes
 
         let reader = Reader::new(std::io::Cursor::new(data));
-        let entries = reader.collect().unwrap();
+        let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         let tst_entries: Vec<_> = entries.iter().filter(|e| e.name == "TST").collect();
         assert_eq!(tst_entries.len(), 1);
@@ -409,7 +425,7 @@ mod tests {
         data.extend(build_data_message(0x81, &300u64.to_le_bytes()));
 
         let reader = Reader::new(std::io::Cursor::new(data));
-        let entries = reader.collect().unwrap();
+        let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
         let tst_entries: Vec<_> = entries.iter().filter(|e| e.name == "TST").collect();
         assert_eq!(tst_entries.len(), 1);
@@ -420,7 +436,7 @@ mod tests {
     fn formats_accessible() {
         let data = build_fmt_bootstrap();
         let mut reader = Reader::new(std::io::Cursor::new(data));
-        let _ = reader.next_entry(); // parse the FMT
+        let _ = reader.next(); // parse the FMT
         assert!(reader.formats().contains_key(&FMT_TYPE));
         assert_eq!(reader.formats().get(&FMT_TYPE).unwrap().name, "FMT");
     }

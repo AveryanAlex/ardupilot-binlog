@@ -11,4 +11,7 @@ pub enum BinlogError {
 
     #[error("unexpected end of data")]
     UnexpectedEof,
+
+    #[error("payload too short for field type")]
+    PayloadTooShort,
 }

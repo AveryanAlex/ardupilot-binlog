@@ -1,5 +1,16 @@
+use std::fmt;
+
 /// A decoded field value from a DataFlash log entry.
+///
+/// ```
+/// use ardupilot_binlog::FieldValue;
+///
+/// let v = FieldValue::Float(45.0);
+/// assert_eq!(v.as_f64(), Some(45.0));
+/// assert_eq!(v.to_string(), "45");
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FieldValue {
     /// Integer values (b, B, h, H, i, I, q, M, L)
     Int(i64),
@@ -45,6 +56,27 @@ impl FieldValue {
         match self {
             FieldValue::String(s) => Some(s),
             _ => None,
+        }
+    }
+}
+
+impl fmt::Display for FieldValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FieldValue::Int(v) => write!(f, "{v}"),
+            FieldValue::Uint(v) => write!(f, "{v}"),
+            FieldValue::Float(v) => write!(f, "{v}"),
+            FieldValue::String(s) => write!(f, "{s}"),
+            FieldValue::Array(arr) => {
+                write!(f, "[")?;
+                for (i, v) in arr.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

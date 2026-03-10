@@ -1,3 +1,21 @@
+//! Parser for ArduPilot DataFlash BIN log files.
+//!
+//! ```
+//! use ardupilot_binlog::Reader;
+//! use std::io::Cursor;
+//!
+//! let data: Vec<u8> = vec![];
+//! let mut reader = Reader::new(Cursor::new(data));
+//! for result in &mut reader {
+//!     let entry = result.unwrap();
+//!     if let Some(roll) = entry.get_f64("Roll") {
+//!         println!("roll = {roll}");
+//!     }
+//! }
+//! // Access discovered formats after iteration
+//! println!("{} formats discovered", reader.formats().len());
+//! ```
+
 mod entry;
 mod error;
 mod file;

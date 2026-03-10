@@ -56,7 +56,11 @@ fn build_data_message(msg_type: u8, payload: &[u8]) -> Vec<u8> {
 #[test]
 fn parse_real_fixture() {
     let file = File::open("tests/fixtures/short-flight.bin").unwrap();
-    let entries = file.entries().unwrap().collect().unwrap();
+    let entries: Vec<_> = file
+        .entries()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Should have many entries
     assert!(
@@ -84,7 +88,9 @@ fn fixture_format_discovery() {
     let mut reader = file.entries().unwrap();
 
     // Parse all entries
-    while reader.next_entry().unwrap().is_some() {}
+    for result in reader.by_ref() {
+        result.unwrap();
+    }
 
     let formats = reader.formats();
     // Should have discovered multiple message types
@@ -109,7 +115,11 @@ fn fixture_format_discovery() {
 #[test]
 fn fixture_has_plausible_data() {
     let file = File::open("tests/fixtures/short-flight.bin").unwrap();
-    let entries = file.entries().unwrap().collect().unwrap();
+    let entries: Vec<_> = file
+        .entries()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     // Check that non-FMT entries have timestamps
     let data_entries: Vec<&Entry> = entries.iter().filter(|e| e.name != "FMT").collect();
@@ -128,7 +138,11 @@ fn fixture_has_plausible_data() {
 #[test]
 fn fixture_parm_entries_have_strings() {
     let file = File::open("tests/fixtures/short-flight.bin").unwrap();
-    let entries = file.entries().unwrap().collect().unwrap();
+    let entries: Vec<_> = file
+        .entries()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
 
     let parm_entries: Vec<&Entry> = entries.iter().filter(|e| e.name == "PARM").collect();
     if !parm_entries.is_empty() {
@@ -177,7 +191,7 @@ fn synthetic_error_recovery() {
     data.extend(build_data_message(0x81, &200u64.to_le_bytes()));
 
     let reader = Reader::new(Cursor::new(data));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
     let tst: Vec<&Entry> = entries.iter().filter(|e| e.name == "TST").collect();
     assert_eq!(tst.len(), 2, "expected 2 TST entries after recovery");
@@ -188,7 +202,7 @@ fn synthetic_error_recovery() {
 #[test]
 fn synthetic_empty() {
     let reader = Reader::new(Cursor::new(Vec::<u8>::new()));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
     assert!(entries.is_empty());
 }
 
@@ -196,7 +210,7 @@ fn synthetic_empty() {
 fn synthetic_fmt_only() {
     let data = build_fmt_bootstrap();
     let reader = Reader::new(Cursor::new(data));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "FMT");
     assert!(entries[0].timestamp_usec.is_none());
@@ -215,7 +229,7 @@ fn synthetic_truncated_final_message() {
     data.extend_from_slice(&[0; 4]); // only 4 of 8 bytes
 
     let reader = Reader::new(Cursor::new(data));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
     let tst: Vec<&Entry> = entries.iter().filter(|e| e.name == "TST").collect();
     assert_eq!(
@@ -249,7 +263,7 @@ fn synthetic_scaled_fields() {
     data.extend(build_data_message(0x82, &payload));
 
     let reader = Reader::new(Cursor::new(data));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
     let scl: Vec<&Entry> = entries.iter().filter(|e| e.name == "SCL").collect();
     assert_eq!(scl.len(), 1);
@@ -282,7 +296,7 @@ fn synthetic_string_fields() {
     data.extend(build_data_message(0x83, &payload));
 
     let reader = Reader::new(Cursor::new(data));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
     let msg: Vec<&Entry> = entries.iter().filter(|e| e.name == "MSG").collect();
     assert_eq!(msg.len(), 1);
@@ -311,7 +325,7 @@ fn synthetic_multiple_message_types() {
     data.extend(build_data_message(0x81, &300u64.to_le_bytes()));
 
     let reader = Reader::new(Cursor::new(data));
-    let entries = reader.collect().unwrap();
+    let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
 
     let tst: Vec<&Entry> = entries.iter().filter(|e| e.name == "TST").collect();
     let dat: Vec<&Entry> = entries.iter().filter(|e| e.name == "DAT").collect();

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::error::BinlogError;
 use crate::value::FieldValue;
 
@@ -12,8 +14,9 @@ pub struct MessageFormat {
     pub name: String,
     /// Raw format string (e.g. "QccccCCCC")
     pub format: String,
-    /// Field labels in order (e.g. ["TimeUS", "Roll", "Pitch", ...])
-    pub labels: Vec<String>,
+    /// Field labels in order (e.g. ["TimeUS", "Roll", "Pitch", ...]).
+    /// Shared with parsed entries via `Arc` to avoid per-entry string copies.
+    pub labels: Arc<[String]>,
 }
 
 /// Return the byte size of a single format character.
@@ -39,34 +42,37 @@ fn decode_string(bytes: &[u8]) -> String {
 
 impl MessageFormat {
     /// Return the computed payload size from the format string (sum of field sizes).
+    #[must_use]
     pub fn payload_size(&self) -> usize {
         self.format.chars().filter_map(|c| field_size(c).ok()).sum()
     }
 
-    /// Decode a raw payload buffer into a list of (label, value) pairs
-    /// using this format's type string and labels.
-    pub fn decode_fields(&self, payload: &[u8]) -> Result<Vec<(String, FieldValue)>, BinlogError> {
-        let mut fields = Vec::new();
+    /// Decode a raw payload buffer into field values using this format's type string.
+    /// Labels are shared separately via `Arc<[String]>`.
+    pub fn decode_fields(&self, payload: &[u8]) -> Result<Vec<FieldValue>, BinlogError> {
+        let mut values = Vec::new();
         let mut offset = 0;
-        let mut label_iter = self.labels.iter();
 
-        for (i, c) in self.format.chars().enumerate() {
+        for c in self.format.chars() {
             let size = field_size(c)?;
             if offset + size > payload.len() {
                 return Err(BinlogError::UnexpectedEof);
             }
             let bytes = &payload[offset..offset + size];
-            let value = decode_field(c, bytes)?;
-            let label = match label_iter.next() {
-                Some(l) => l.clone(),
-                None => format!("field_{}", i),
-            };
-            fields.push((label, value));
+            values.push(decode_field(c, bytes)?);
             offset += size;
         }
 
-        Ok(fields)
+        Ok(values)
     }
+}
+
+/// Convert a byte slice prefix to a fixed-size array, returning an error if too short.
+fn to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], BinlogError> {
+    bytes
+        .get(..N)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(BinlogError::PayloadTooShort)
 }
 
 /// Decode a single field from its raw bytes given the format character.
@@ -80,24 +86,14 @@ fn decode_field(c: char, bytes: &[u8]) -> Result<FieldValue, BinlogError> {
         'H' => Ok(FieldValue::Int(
             u16::from_le_bytes([bytes[0], bytes[1]]) as i64
         )),
-        'i' => Ok(FieldValue::Int(
-            i32::from_le_bytes(bytes[..4].try_into().unwrap()) as i64,
-        )),
-        'I' => Ok(FieldValue::Int(
-            u32::from_le_bytes(bytes[..4].try_into().unwrap()) as i64,
-        )),
-        'q' => Ok(FieldValue::Int(i64::from_le_bytes(
-            bytes[..8].try_into().unwrap(),
-        ))),
-        'Q' => Ok(FieldValue::Uint(u64::from_le_bytes(
-            bytes[..8].try_into().unwrap(),
-        ))),
+        'i' => Ok(FieldValue::Int(i32::from_le_bytes(to_array(bytes)?) as i64)),
+        'I' => Ok(FieldValue::Int(u32::from_le_bytes(to_array(bytes)?) as i64)),
+        'q' => Ok(FieldValue::Int(i64::from_le_bytes(to_array(bytes)?))),
+        'Q' => Ok(FieldValue::Uint(u64::from_le_bytes(to_array(bytes)?))),
         'f' => Ok(FieldValue::Float(
-            f32::from_le_bytes(bytes[..4].try_into().unwrap()) as f64,
+            f32::from_le_bytes(to_array(bytes)?) as f64
         )),
-        'd' => Ok(FieldValue::Float(f64::from_le_bytes(
-            bytes[..8].try_into().unwrap(),
-        ))),
+        'd' => Ok(FieldValue::Float(f64::from_le_bytes(to_array(bytes)?))),
         'c' => Ok(FieldValue::Float(
             i16::from_le_bytes([bytes[0], bytes[1]]) as f64 / 100.0,
         )),
@@ -105,14 +101,12 @@ fn decode_field(c: char, bytes: &[u8]) -> Result<FieldValue, BinlogError> {
             u16::from_le_bytes([bytes[0], bytes[1]]) as f64 / 100.0,
         )),
         'e' => Ok(FieldValue::Float(
-            i32::from_le_bytes(bytes[..4].try_into().unwrap()) as f64 / 100.0,
+            i32::from_le_bytes(to_array(bytes)?) as f64 / 100.0,
         )),
         'E' => Ok(FieldValue::Float(
-            u32::from_le_bytes(bytes[..4].try_into().unwrap()) as f64 / 100.0,
+            u32::from_le_bytes(to_array(bytes)?) as f64 / 100.0,
         )),
-        'L' => Ok(FieldValue::Int(
-            i32::from_le_bytes(bytes[..4].try_into().unwrap()) as i64,
-        )),
+        'L' => Ok(FieldValue::Int(i32::from_le_bytes(to_array(bytes)?) as i64)),
         'M' => Ok(FieldValue::Int(bytes[0] as i64)),
         'n' => Ok(FieldValue::String(decode_string(&bytes[..4]))),
         'N' => Ok(FieldValue::String(decode_string(&bytes[..16]))),
@@ -140,14 +134,20 @@ pub(crate) fn parse_fmt_payload(payload: &[u8]) -> Result<MessageFormat, BinlogE
     let name = decode_string(&payload[2..6]);
     let format = decode_string(&payload[6..22]);
     let labels_raw = decode_string(&payload[22..86]);
-    let labels: Vec<String> = labels_raw.split(',').map(|s| s.to_string()).collect();
+    let mut labels: Vec<String> = labels_raw.split(',').map(|s| s.to_string()).collect();
+
+    // Pad with synthetic labels if format has more fields than labels
+    let format_len = format.chars().count();
+    while labels.len() < format_len {
+        labels.push(format!("field_{}", labels.len()));
+    }
 
     Ok(MessageFormat {
         msg_type,
         msg_len,
         name,
         format,
-        labels,
+        labels: labels.into(),
     })
 }
 
@@ -191,7 +191,7 @@ mod tests {
             msg_len: 0,
             name: String::new(),
             format: "QccccCCCC".into(),
-            labels: vec![],
+            labels: Arc::from([]),
         };
         // Q=8, c=2*4, C=2*4 = 8+8+8 = 24
         assert_eq!(fmt.payload_size(), 24);
@@ -325,38 +325,35 @@ mod tests {
     }
 
     #[test]
-    fn decode_fields_with_labels() {
+    fn decode_fields_values() {
         let fmt = MessageFormat {
             msg_type: 0x81,
             msg_len: 27,
             name: "TEST".into(),
             format: "Qh".into(),
-            labels: vec!["TimeUS".into(), "Val".into()],
+            labels: vec!["TimeUS".into(), "Val".into()].into(),
         };
         let mut payload = Vec::new();
         payload.extend_from_slice(&1000u64.to_le_bytes()); // Q
         payload.extend_from_slice(&(-42i16).to_le_bytes()); // h
-        let fields = fmt.decode_fields(&payload).unwrap();
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].0, "TimeUS");
-        assert_eq!(fields[0].1, FieldValue::Uint(1000));
-        assert_eq!(fields[1].0, "Val");
-        assert_eq!(fields[1].1, FieldValue::Int(-42));
+        let values = fmt.decode_fields(&payload).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], FieldValue::Uint(1000));
+        assert_eq!(values[1], FieldValue::Int(-42));
     }
 
     #[test]
-    fn decode_fields_synthetic_labels() {
-        let fmt = MessageFormat {
-            msg_type: 0,
-            msg_len: 0,
-            name: "X".into(),
-            format: "BB".into(),
-            labels: vec!["First".into()], // only 1 label for 2 fields
-        };
-        let payload = [10u8, 20];
-        let fields = fmt.decode_fields(&payload).unwrap();
-        assert_eq!(fields[0].0, "First");
-        assert_eq!(fields[1].0, "field_1");
+    fn parse_fmt_payload_pads_labels() {
+        let mut payload = [0u8; 86];
+        payload[0] = 0x82;
+        payload[1] = 5;
+        payload[2..6].copy_from_slice(b"X\0\0\0");
+        payload[6..8].copy_from_slice(b"BB");
+        payload[22..27].copy_from_slice(b"First");
+        let mf = parse_fmt_payload(&payload).unwrap();
+        assert_eq!(mf.labels.len(), 2);
+        assert_eq!(mf.labels[0], "First");
+        assert_eq!(mf.labels[1], "field_1");
     }
 
     #[test]
