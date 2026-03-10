@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::entry::Entry;
 use crate::error::BinlogError;
-use crate::format::{parse_fmt_payload, MessageFormat};
+use crate::format::{MessageFormat, parse_fmt_payload};
 
 const HEADER_MAGIC: [u8; 2] = [0xA3, 0x95];
 const FMT_TYPE: u8 = 0x80;
@@ -129,7 +129,7 @@ impl<R: Read> Reader<R> {
                         }
                     };
                     let labels = format.labels.clone(); // Arc clone — cheap
-                                                        // Borrow released; safe to mutate self.formats
+                    // Borrow released; safe to mutate self.formats
                     let entry = Entry {
                         name: "FMT".into(),
                         msg_type: FMT_TYPE,
@@ -421,7 +421,7 @@ mod tests {
         data.extend_from_slice(&HEADER_MAGIC);
         data.push(0x99);
         data.extend_from_slice(&[0; 20]); // some bytes
-                                          // Valid message after
+        // Valid message after
         data.extend(build_data_message(0x81, &300u64.to_le_bytes()));
 
         let reader = Reader::new(std::io::Cursor::new(data));
