@@ -23,6 +23,9 @@ mod format;
 mod reader;
 mod value;
 
+pub(crate) const HEADER_MAGIC: [u8; 2] = [0xA3, 0x95];
+pub(crate) const FMT_TYPE: u8 = 0x80;
+
 pub use entry::Entry;
 pub use error::BinlogError;
 pub use file::File;

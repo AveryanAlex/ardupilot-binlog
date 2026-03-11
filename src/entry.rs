@@ -27,7 +27,7 @@ pub struct Entry {
     /// Message type ID (0–255)
     pub msg_type: u8,
 
-    /// Timestamp in microseconds since boot (from the TimeUS field).
+    /// Timestamp in microseconds since boot (from the first Q-typed field).
     /// None for FMT messages and messages without a Q-typed first field.
     pub timestamp_usec: Option<u64>,
 

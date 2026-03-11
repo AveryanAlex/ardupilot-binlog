@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::BinlogError;
 use crate::format::MessageFormat;
 use crate::reader::Reader;
+use crate::HEADER_MAGIC;
 
-const HEADER_MAGIC: [u8; 2] = [0xA3, 0x95];
 const TAIL_SCAN_SIZE: u64 = 65536;
 
 /// High-level wrapper for reading a DataFlash BIN file from disk.
@@ -98,7 +99,10 @@ impl File {
 
 /// Scan a byte buffer for valid message headers and extract the maximum timestamp.
 /// Uses the format table to validate message types and sizes.
-fn scan_tail_for_last_timestamp(buf: &[u8], formats: &HashMap<u8, MessageFormat>) -> Option<u64> {
+fn scan_tail_for_last_timestamp(
+    buf: &[u8],
+    formats: &HashMap<u8, Arc<MessageFormat>>,
+) -> Option<u64> {
     let mut max_ts: Option<u64> = None;
     let mut pos = 0;
 
@@ -109,22 +113,8 @@ fn scan_tail_for_last_timestamp(buf: &[u8], formats: &HashMap<u8, MessageFormat>
             if let Some(fmt) = formats.get(&msg_type) {
                 let msg_len = fmt.msg_len as usize;
                 if pos + msg_len <= buf.len() {
-                    // Extract timestamp from first field
-                    let first_char = fmt.format.chars().next();
-                    let is_time_label = fmt
-                        .labels
-                        .first()
-                        .map(|l| l == "TimeMS" || l == "TimeUS")
-                        .unwrap_or(false);
-                    let ts_start = pos + 3;
-                    if first_char == Some('Q') && msg_len >= 3 + 8 {
-                        let ts_bytes: [u8; 8] = buf[ts_start..ts_start + 8].try_into().unwrap();
-                        let ts = u64::from_le_bytes(ts_bytes);
-                        max_ts = Some(max_ts.map_or(ts, |prev: u64| prev.max(ts)));
-                    } else if first_char == Some('I') && is_time_label && msg_len >= 3 + 4 {
-                        let ts_bytes: [u8; 4] = buf[ts_start..ts_start + 4].try_into().unwrap();
-                        let ms = u32::from_le_bytes(ts_bytes) as u64;
-                        let ts = ms * 1000;
+                    let payload = &buf[(pos + 3)..(pos + msg_len)];
+                    if let Some(ts) = fmt.extract_timestamp(payload) {
                         max_ts = Some(max_ts.map_or(ts, |prev: u64| prev.max(ts)));
                     }
                     pos += msg_len;

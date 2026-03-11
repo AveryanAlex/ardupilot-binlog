@@ -1,57 +1,7 @@
+mod common;
+
 use ardupilot_binlog::{Entry, FieldValue, File, Reader};
 use std::io::Cursor;
-
-// ---- Helpers for building synthetic BIN streams ----
-
-const HEADER_MAGIC: [u8; 2] = [0xA3, 0x95];
-const FMT_TYPE: u8 = 0x80;
-
-fn build_fmt_bootstrap() -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&HEADER_MAGIC);
-    msg.push(FMT_TYPE);
-    let mut payload = [0u8; 86];
-    payload[0] = FMT_TYPE;
-    payload[1] = 89;
-    payload[2..6].copy_from_slice(b"FMT\0");
-    payload[6..11].copy_from_slice(b"BBnNZ");
-    let labels = b"Type,Length,Name,Format,Labels";
-    payload[22..22 + labels.len()].copy_from_slice(labels);
-    msg.extend_from_slice(&payload);
-    msg
-}
-
-fn build_fmt_for_type(
-    msg_type: u8,
-    msg_len: u8,
-    name: &[u8; 4],
-    format: &str,
-    labels: &str,
-) -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&HEADER_MAGIC);
-    msg.push(FMT_TYPE);
-    let mut payload = [0u8; 86];
-    payload[0] = msg_type;
-    payload[1] = msg_len;
-    payload[2..6].copy_from_slice(name);
-    let fmt_bytes = format.as_bytes();
-    payload[6..6 + fmt_bytes.len()].copy_from_slice(fmt_bytes);
-    let lbl_bytes = labels.as_bytes();
-    payload[22..22 + lbl_bytes.len()].copy_from_slice(lbl_bytes);
-    msg.extend_from_slice(&payload);
-    msg
-}
-
-fn build_data_message(msg_type: u8, payload: &[u8]) -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&HEADER_MAGIC);
-    msg.push(msg_type);
-    msg.extend_from_slice(payload);
-    msg
-}
-
-// ---- Integration tests against real fixture ----
 
 #[test]
 fn parse_real_fixture() {
@@ -71,7 +21,7 @@ fn parse_real_fixture() {
 
     // First entries should be FMTs
     assert_eq!(entries[0].name, "FMT");
-    assert_eq!(entries[0].msg_type, FMT_TYPE);
+    assert_eq!(entries[0].msg_type, 0x80);
 
     // Count FMT entries — they should all be at the start
     let fmt_count = entries.iter().take_while(|e| e.name == "FMT").count();
@@ -101,7 +51,7 @@ fn fixture_format_discovery() {
     );
 
     // FMT should always be present
-    assert!(formats.contains_key(&FMT_TYPE));
+    assert!(formats.contains_key(&0x80));
 
     // Print discovered format names for debugging
     let names: Vec<&str> = formats.values().map(|f| f.name.as_str()).collect();
@@ -180,15 +130,17 @@ fn fixture_time_range() {
 #[test]
 fn synthetic_error_recovery() {
     let mut data = Vec::new();
-    data.extend(build_fmt_bootstrap());
+    data.extend(common::build_fmt_bootstrap());
     // Define TST: type 0x81, format "Q", total len = 11
-    data.extend(build_fmt_for_type(0x81, 11, b"TST\0", "Q", "TimeUS"));
+    data.extend(common::build_fmt_for_type(
+        0x81, 11, b"TST\0", "Q", "TimeUS",
+    ));
     // First valid message
-    data.extend(build_data_message(0x81, &100u64.to_le_bytes()));
+    data.extend(common::build_data_message(0x81, &100u64.to_le_bytes()));
     // 50 bytes of garbage
     data.extend_from_slice(&[0xDE; 50]);
     // Second valid message
-    data.extend(build_data_message(0x81, &200u64.to_le_bytes()));
+    data.extend(common::build_data_message(0x81, &200u64.to_le_bytes()));
 
     let reader = Reader::new(Cursor::new(data));
     let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
@@ -208,7 +160,7 @@ fn synthetic_empty() {
 
 #[test]
 fn synthetic_fmt_only() {
-    let data = build_fmt_bootstrap();
+    let data = common::build_fmt_bootstrap();
     let reader = Reader::new(Cursor::new(data));
     let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(entries.len(), 1);
@@ -219,12 +171,14 @@ fn synthetic_fmt_only() {
 #[test]
 fn synthetic_truncated_final_message() {
     let mut data = Vec::new();
-    data.extend(build_fmt_bootstrap());
-    data.extend(build_fmt_for_type(0x81, 11, b"TST\0", "Q", "TimeUS"));
+    data.extend(common::build_fmt_bootstrap());
+    data.extend(common::build_fmt_for_type(
+        0x81, 11, b"TST\0", "Q", "TimeUS",
+    ));
     // Valid message
-    data.extend(build_data_message(0x81, &100u64.to_le_bytes()));
+    data.extend(common::build_data_message(0x81, &100u64.to_le_bytes()));
     // Truncated message — header only, no complete payload
-    data.extend_from_slice(&HEADER_MAGIC);
+    data.extend_from_slice(&[0xA3, 0x95]);
     data.push(0x81);
     data.extend_from_slice(&[0; 4]); // only 4 of 8 bytes
 
@@ -243,10 +197,10 @@ fn synthetic_truncated_final_message() {
 #[test]
 fn synthetic_scaled_fields() {
     let mut data = Vec::new();
-    data.extend(build_fmt_bootstrap());
+    data.extend(common::build_fmt_bootstrap());
     // Define type with scaled fields: "QcCeE"
     // Q=8, c=2, C=2, e=4, E=4 = 20 payload, total=23
-    data.extend(build_fmt_for_type(
+    data.extend(common::build_fmt_for_type(
         0x82,
         23,
         b"SCL\0",
@@ -260,7 +214,7 @@ fn synthetic_scaled_fields() {
     payload.extend_from_slice(&1234u16.to_le_bytes()); // C: 1234 / 100 = 12.34
     payload.extend_from_slice(&(-5000i32).to_le_bytes()); // e: -5000 / 100 = -50.0
     payload.extend_from_slice(&100_000u32.to_le_bytes()); // E: 100000 / 100 = 1000.0
-    data.extend(build_data_message(0x82, &payload));
+    data.extend(common::build_data_message(0x82, &payload));
 
     let reader = Reader::new(Cursor::new(data));
     let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
@@ -278,9 +232,9 @@ fn synthetic_scaled_fields() {
 #[test]
 fn synthetic_string_fields() {
     let mut data = Vec::new();
-    data.extend(build_fmt_bootstrap());
+    data.extend(common::build_fmt_bootstrap());
     // MSG type: "QZ" format, total = 3 + 8 + 64 = 75
-    data.extend(build_fmt_for_type(
+    data.extend(common::build_fmt_for_type(
         0x83,
         75,
         b"MSG\0",
@@ -293,7 +247,7 @@ fn synthetic_string_fields() {
     let mut msg_bytes = [0u8; 64];
     msg_bytes[..11].copy_from_slice(b"Hello World");
     payload.extend_from_slice(&msg_bytes);
-    data.extend(build_data_message(0x83, &payload));
+    data.extend(common::build_data_message(0x83, &payload));
 
     let reader = Reader::new(Cursor::new(data));
     let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
@@ -307,22 +261,30 @@ fn synthetic_string_fields() {
 #[test]
 fn synthetic_multiple_message_types() {
     let mut data = Vec::new();
-    data.extend(build_fmt_bootstrap());
+    data.extend(common::build_fmt_bootstrap());
 
     // Define two types
-    data.extend(build_fmt_for_type(0x81, 11, b"TST\0", "Q", "TimeUS"));
-    data.extend(build_fmt_for_type(0x82, 15, b"DAT\0", "Qhh", "TimeUS,X,Y"));
+    data.extend(common::build_fmt_for_type(
+        0x81, 11, b"TST\0", "Q", "TimeUS",
+    ));
+    data.extend(common::build_fmt_for_type(
+        0x82,
+        15,
+        b"DAT\0",
+        "Qhh",
+        "TimeUS,X,Y",
+    ));
 
     // Interleave messages
-    data.extend(build_data_message(0x81, &100u64.to_le_bytes()));
+    data.extend(common::build_data_message(0x81, &100u64.to_le_bytes()));
 
     let mut dat_payload = Vec::new();
     dat_payload.extend_from_slice(&200u64.to_le_bytes());
     dat_payload.extend_from_slice(&42i16.to_le_bytes());
     dat_payload.extend_from_slice(&(-7i16).to_le_bytes());
-    data.extend(build_data_message(0x82, &dat_payload));
+    data.extend(common::build_data_message(0x82, &dat_payload));
 
-    data.extend(build_data_message(0x81, &300u64.to_le_bytes()));
+    data.extend(common::build_data_message(0x81, &300u64.to_le_bytes()));
 
     let reader = Reader::new(Cursor::new(data));
     let entries: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
@@ -334,4 +296,40 @@ fn synthetic_multiple_message_types() {
     assert_eq!(dat.len(), 1);
     assert_eq!(dat[0].get("X"), Some(&FieldValue::Int(42)));
     assert_eq!(dat[0].get("Y"), Some(&FieldValue::Int(-7)));
+}
+
+#[test]
+fn golden_snapshot() {
+    let file = File::open("tests/fixtures/short-flight.bin").unwrap();
+    let entries: Vec<_> = file
+        .entries()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    // Exact total entry count
+    assert_eq!(entries.len(), 6290, "total entry count");
+
+    // Exact total field count across all entries
+    let total_fields: usize = entries.iter().map(|e| e.len()).sum();
+    assert_eq!(total_fields, 54277, "total field count");
+
+    // Exact first and last timestamps
+    let timestamps: Vec<u64> = entries.iter().filter_map(|e| e.timestamp_usec).collect();
+    assert_eq!(timestamps.first(), Some(&11459000), "first timestamp");
+    assert_eq!(timestamps.last(), Some(&26729000), "last timestamp");
+
+    // Per-type counts: count occurrences of each message type
+    let count = |name: &str| -> usize { entries.iter().filter(|e| e.name == name).count() };
+
+    // FMT and PARM (required)
+    assert_eq!(count("FMT"), 72, "FMT count");
+    assert_eq!(count("PARM"), 491, "PARM count");
+
+    // At least 3 additional concrete message types
+    assert_eq!(count("ATT"), 150, "ATT count");
+    assert_eq!(count("GPS"), 73, "GPS count");
+    assert_eq!(count("IMU"), 749, "IMU count");
+    assert_eq!(count("BARO"), 150, "BARO count");
+    assert_eq!(count("MAG"), 150, "MAG count");
 }

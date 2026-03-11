@@ -47,6 +47,35 @@ impl MessageFormat {
         self.format.chars().filter_map(|c| field_size(c).ok()).sum()
     }
 
+    /// Extract a microsecond timestamp from the raw payload bytes, if present.
+    ///
+    /// - Format char `'Q'`: first 8 bytes as `u64` (already microseconds).
+    /// - Format char `'I'` with first label `"TimeMS"` or `"TimeUS"`: first 4 bytes
+    ///   as `u32`, multiplied by 1000 to convert milliseconds → microseconds.
+    /// - Otherwise returns `None`.
+    pub(crate) fn extract_timestamp(&self, payload: &[u8]) -> Option<u64> {
+        match self.format.as_bytes().first().copied() {
+            Some(b'Q') if payload.len() >= 8 => {
+                let bytes: [u8; 8] = payload[..8].try_into().ok()?;
+                Some(u64::from_le_bytes(bytes))
+            }
+            Some(b'I') if payload.len() >= 4 => {
+                let is_time_label = self
+                    .labels
+                    .first()
+                    .map(|l| l == "TimeMS" || l == "TimeUS")
+                    .unwrap_or(false);
+                if is_time_label {
+                    let bytes: [u8; 4] = payload[..4].try_into().ok()?;
+                    Some(u32::from_le_bytes(bytes) as u64 * 1000)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Decode a raw payload buffer into field values using this format's type string.
     /// Labels are shared separately via `Arc<[String]>`.
     pub fn decode_fields(&self, payload: &[u8]) -> Result<Vec<FieldValue>, BinlogError> {
@@ -77,46 +106,47 @@ fn to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], BinlogError> {
 
 /// Decode a single field from its raw bytes given the format character.
 fn decode_field(c: char, bytes: &[u8]) -> Result<FieldValue, BinlogError> {
+    let scaled = |raw: f64| FieldValue::Float(raw / 100.0);
+
     match c {
         'b' => Ok(FieldValue::Int(bytes[0] as i8 as i64)),
-        'B' => Ok(FieldValue::Int(bytes[0] as i64)),
-        'h' => Ok(FieldValue::Int(
-            i16::from_le_bytes([bytes[0], bytes[1]]) as i64
-        )),
-        'H' => Ok(FieldValue::Int(
-            u16::from_le_bytes([bytes[0], bytes[1]]) as i64
-        )),
-        'i' => Ok(FieldValue::Int(i32::from_le_bytes(to_array(bytes)?) as i64)),
-        'I' => Ok(FieldValue::Int(u32::from_le_bytes(to_array(bytes)?) as i64)),
+        'B' | 'M' => Ok(FieldValue::Int(bytes[0] as i64)),
+        'h' | 'H' => {
+            let pair = [bytes[0], bytes[1]];
+            Ok(FieldValue::Int(if c == 'h' {
+                i16::from_le_bytes(pair) as i64
+            } else {
+                u16::from_le_bytes(pair) as i64
+            }))
+        }
+        'i' | 'I' | 'L' => Ok(FieldValue::Int(if c == 'I' {
+            u32::from_le_bytes(to_array(bytes)?) as i64
+        } else {
+            i32::from_le_bytes(to_array(bytes)?) as i64
+        })),
         'q' => Ok(FieldValue::Int(i64::from_le_bytes(to_array(bytes)?))),
         'Q' => Ok(FieldValue::Uint(u64::from_le_bytes(to_array(bytes)?))),
         'f' => Ok(FieldValue::Float(
             f32::from_le_bytes(to_array(bytes)?) as f64
         )),
         'd' => Ok(FieldValue::Float(f64::from_le_bytes(to_array(bytes)?))),
-        'c' => Ok(FieldValue::Float(
-            i16::from_le_bytes([bytes[0], bytes[1]]) as f64 / 100.0,
-        )),
-        'C' => Ok(FieldValue::Float(
-            u16::from_le_bytes([bytes[0], bytes[1]]) as f64 / 100.0,
-        )),
-        'e' => Ok(FieldValue::Float(
-            i32::from_le_bytes(to_array(bytes)?) as f64 / 100.0,
-        )),
-        'E' => Ok(FieldValue::Float(
-            u32::from_le_bytes(to_array(bytes)?) as f64 / 100.0,
-        )),
-        'L' => Ok(FieldValue::Int(i32::from_le_bytes(to_array(bytes)?) as i64)),
-        'M' => Ok(FieldValue::Int(bytes[0] as i64)),
-        'n' => Ok(FieldValue::String(decode_string(&bytes[..4]))),
-        'N' => Ok(FieldValue::String(decode_string(&bytes[..16]))),
-        'Z' => Ok(FieldValue::String(decode_string(&bytes[..64]))),
+        'c' | 'e' => Ok(scaled(if c == 'c' {
+            i16::from_le_bytes([bytes[0], bytes[1]]) as f64
+        } else {
+            i32::from_le_bytes(to_array(bytes)?) as f64
+        })),
+        'C' | 'E' => Ok(scaled(if c == 'C' {
+            u16::from_le_bytes([bytes[0], bytes[1]]) as f64
+        } else {
+            u32::from_le_bytes(to_array(bytes)?) as f64
+        })),
+        'n' | 'N' | 'Z' => Ok(FieldValue::String(decode_string(bytes))),
         'a' => {
-            let mut arr = Vec::with_capacity(32);
-            for i in 0..32 {
-                let off = i * 2;
-                arr.push(i16::from_le_bytes([bytes[off], bytes[off + 1]]));
-            }
+            let arr = bytes
+                .chunks_exact(2)
+                .take(32)
+                .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
             Ok(FieldValue::Array(arr))
         }
         _ => Err(BinlogError::InvalidFormat(c)),
