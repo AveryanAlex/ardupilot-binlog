@@ -1,5 +1,11 @@
 # ardupilot-binlog
 
+[![Crates.io](https://img.shields.io/crates/v/ardupilot-binlog)](https://crates.io/crates/ardupilot-binlog)
+[![docs.rs](https://img.shields.io/docsrs/ardupilot-binlog)](https://docs.rs/ardupilot-binlog)
+[![CI](https://github.com/AveryanAlex/ardupilot-binlog/actions/workflows/ci.yml/badge.svg)](https://github.com/AveryanAlex/ardupilot-binlog/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/AveryanAlex/ardupilot-binlog/branch/main/graph/badge.svg)](https://codecov.io/gh/AveryanAlex/ardupilot-binlog)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/ardupilot-binlog)](https://github.com/AveryanAlex/ardupilot-binlog/blob/main/LICENSE-MIT)
+
 Parser for ArduPilot DataFlash BIN log files.
 
 Reads `.bin` / `.BIN` files produced by ArduPilot's onboard DataFlash logger. The format is self-describing — message schemas are discovered from FMT messages within each file, so this crate works with any ArduPilot version without hardcoded message definitions.
@@ -8,7 +14,7 @@ Reads `.bin` / `.BIN` files produced by ArduPilot's onboard DataFlash logger. Th
 
 ```toml
 [dependencies]
-ardupilot-binlog = "0.1"
+ardupilot-binlog = "0.2"
 ```
 
 ### Parse all entries

@@ -4,10 +4,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::HEADER_MAGIC;
 use crate::error::BinlogError;
 use crate::format::MessageFormat;
 use crate::reader::Reader;
-use crate::HEADER_MAGIC;
 
 const TAIL_SCAN_SIZE: u64 = 65536;
 

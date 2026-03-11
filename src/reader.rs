@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::entry::Entry;
 use crate::error::BinlogError;
-use crate::format::{parse_fmt_payload, MessageFormat};
+use crate::format::{MessageFormat, parse_fmt_payload};
 use crate::{FMT_TYPE, HEADER_MAGIC};
 
 const MAX_CONSECUTIVE_ERRORS: u32 = 256;
@@ -396,7 +396,7 @@ mod tests {
         data.extend_from_slice(&HEADER_MAGIC);
         data.push(0x99);
         data.extend_from_slice(&[0; 20]); // some bytes
-                                          // Valid message after
+        // Valid message after
         data.extend(build_data_message(0x81, &300u64.to_le_bytes()));
 
         let reader = Reader::new(std::io::Cursor::new(data));
