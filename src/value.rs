@@ -16,7 +16,7 @@ pub enum FieldValue {
     Int(i64),
     /// Unsigned 64-bit integer (Q) — separate because u64 can exceed i64 range
     Uint(u64),
-    /// Floating-point values (f, d) and pre-scaled values (c, C, e, E already divided by 100)
+    /// Floating-point values (f, d) and scaled values (c, C, e, E divided by 100; L in degrees)
     Float(f64),
     /// String values (n, N, Z) — null bytes trimmed
     String(String),
