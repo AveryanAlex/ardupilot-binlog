@@ -106,7 +106,11 @@ fn to_array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], BinlogError> {
 
 /// Decode a single field from its raw bytes given the format character.
 fn decode_field(c: char, bytes: &[u8]) -> Result<FieldValue, BinlogError> {
-    let scaled = |raw: f64| FieldValue::Float(raw / 100.0);
+    // Scale factors for format-multiplier characters come from flightlog-core,
+    // the reference ArduPilot DataFlash parser: `c`/`C`/`e`/`E` scale by 1e-2,
+    // `L` (latitude/longitude) by 1e-7.
+    let scaled =
+        |raw: f64, c: char| FieldValue::Float(raw * flightlog_core::dataflash::scale(c as u8));
 
     match c {
         'b' => Ok(FieldValue::Int(bytes[0] as i8 as i64)),
@@ -119,7 +123,7 @@ fn decode_field(c: char, bytes: &[u8]) -> Result<FieldValue, BinlogError> {
                 u16::from_le_bytes(pair) as i64
             }))
         }
-        'i' | 'I' | 'L' => Ok(FieldValue::Int(if c == 'I' {
+        'i' | 'I' => Ok(FieldValue::Int(if c == 'I' {
             u32::from_le_bytes(to_array(bytes)?) as i64
         } else {
             i32::from_le_bytes(to_array(bytes)?) as i64
@@ -130,16 +134,23 @@ fn decode_field(c: char, bytes: &[u8]) -> Result<FieldValue, BinlogError> {
             f32::from_le_bytes(to_array(bytes)?) as f64
         )),
         'd' => Ok(FieldValue::Float(f64::from_le_bytes(to_array(bytes)?))),
-        'c' | 'e' => Ok(scaled(if c == 'c' {
-            i16::from_le_bytes([bytes[0], bytes[1]]) as f64
-        } else {
-            i32::from_le_bytes(to_array(bytes)?) as f64
-        })),
-        'C' | 'E' => Ok(scaled(if c == 'C' {
-            u16::from_le_bytes([bytes[0], bytes[1]]) as f64
-        } else {
-            u32::from_le_bytes(to_array(bytes)?) as f64
-        })),
+        'L' => Ok(scaled(i32::from_le_bytes(to_array(bytes)?) as f64, c)),
+        'c' | 'e' => Ok(scaled(
+            if c == 'c' {
+                i16::from_le_bytes([bytes[0], bytes[1]]) as f64
+            } else {
+                i32::from_le_bytes(to_array(bytes)?) as f64
+            },
+            c,
+        )),
+        'C' | 'E' => Ok(scaled(
+            if c == 'C' {
+                u16::from_le_bytes([bytes[0], bytes[1]]) as f64
+            } else {
+                u32::from_le_bytes(to_array(bytes)?) as f64
+            },
+            c,
+        )),
         'n' | 'N' | 'Z' => Ok(FieldValue::String(decode_string(bytes))),
         'a' => {
             let arr = bytes
@@ -264,12 +275,6 @@ mod tests {
         );
         // M: flight mode u8
         assert_eq!(decode_field('M', &[5]).unwrap(), FieldValue::Int(5));
-        // L: lat/lon degE7 i32
-        let val: i32 = 473_977_000; // ~47.3977 degrees
-        assert_eq!(
-            decode_field('L', &val.to_le_bytes()).unwrap(),
-            FieldValue::Int(val as i64)
-        );
     }
 
     #[test]
@@ -314,6 +319,12 @@ mod tests {
             decode_field('E', &v.to_le_bytes()).unwrap(),
             FieldValue::Float(1000.0)
         );
+        // L: lat/lon in 1e7 fixed-point degrees -> degrees (not the raw 350123456)
+        let v: i32 = 350_123_456; // 35.0123456 degrees
+        let FieldValue::Float(deg) = decode_field('L', &v.to_le_bytes()).unwrap() else {
+            panic!("L must decode to a Float");
+        };
+        assert!((deg - 35.0123456).abs() < 1e-7);
     }
 
     #[test]
